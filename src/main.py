@@ -1,6 +1,7 @@
 """CLI-инструмент визуализации графа зависимостей Cargo."""
 
 import sys
+import time
 import json
 import urllib.request
 import urllib.error
@@ -9,6 +10,8 @@ from dataclasses import dataclass
 from typing import Optional, Callable
 
 MAX_DEPTH_DEFAULT = 5
+REQUEST_TIMEOUT = 10  # Секунд на один запрос
+REQUEST_DELAY = 0.5   # Задержка между запросами
 
 
 @dataclass
@@ -93,8 +96,33 @@ def print_config(cfg: Config) -> None:
     print(f"filter_substring = {cfg.filter_substring}")
 
 
+def _fetch_json(url: str) -> dict:
+    """Вспомогательная функция для GET-запроса с таймаутом."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "CargoDepVisualizer/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_latest_version(package: str) -> str:
+    """Узнает последнюю версию пакета, если она не указана."""
+    url = f"https://crates.io/api/v1/crates/{package}"
+    try:
+        data = _fetch_json(url)
+        return data["crate"]["max_version"]
+    except Exception:
+        return ""
+
+
 def fetch_dependencies_api(package: str, version: str = "") -> list[str]:
     """Извлекает прямые зависимости пакета с crates.io."""
+    time.sleep(REQUEST_DELAY)  # Пауза, чтобы не получить бан от API
+    print(f"  [Скачиваем данные] {package}...")
+
+    if not version:
+        version = fetch_latest_version(package)
+
     if version:
         url = (
             f"https://crates.io/api/v1/crates/"
@@ -103,15 +131,10 @@ def fetch_dependencies_api(package: str, version: str = "") -> list[str]:
     else:
         url = f"https://crates.io/api/v1/crates/{package}/dependencies"
 
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "CargoDepVisualizer/1.0"}
-    )
-
     try:
-        with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = _fetch_json(url)
     except urllib.error.URLError as exc:
-        print(f"Ошибка сети для {package}: {exc}", file=sys.stderr)
+        print(f"  [Ошибка] Не удалось скачать {package}: {exc}")
         return []
 
     deps = set()
@@ -155,6 +178,7 @@ def bfs_recursive(
     if current_depth > max_depth or not current_level:
         return graph
 
+    print(f"\nУровень глубины {current_depth}:")
     next_level = []
     for node in current_level:
         if node in visited:
@@ -173,6 +197,69 @@ def bfs_recursive(
     )
 
 
+def get_load_order(graph: dict[str, list[str]]) -> list[str]:
+    """Возвращает порядок загрузки (топологическая сортировка)."""
+    visited = set()
+    temp = set()
+    result = []
+
+    def visit(node: str) -> None:
+        if node in temp:
+            return
+        if node not in visited:
+            temp.add(node)
+            for dep in graph.get(node, []):
+                visit(dep)
+            temp.remove(node)
+            visited.add(node)
+            result.append(node)
+
+    for node in graph:
+        visit(node)
+    return result
+
+
+def print_ascii_tree(
+    graph: dict[str, list[str]],
+    node: str,
+    prefix: str = "",
+    is_last: bool = True,
+    visited: Optional[set] = None,
+) -> None:
+    """Выводит граф в виде ASCII-дерева."""
+    if visited is None:
+        visited = set()
+
+    if not visited:
+        print(node)
+    else:
+        branch = "└── " if is_last else "├── "
+        print(f"{prefix}{branch}{node}")
+
+    if node in visited:
+        print(f"{prefix}    [цикл]")
+        return
+
+    visited.add(node)
+    deps = graph.get(node, [])
+    for i, dep in enumerate(deps):
+        is_last_dep = (i == len(deps) - 1)
+        new_prefix = prefix + ("    " if is_last else "│   ")
+        print_ascii_tree(graph, dep, new_prefix, is_last_dep, visited)
+    visited.remove(node)
+
+
+def generate_d2(graph: dict[str, list[str]]) -> str:
+    """Генерирует текст на языке D2."""
+    lines = []
+    for node, deps in graph.items():
+        if not deps:
+            lines.append(f'"{node}"')
+        for dep in deps:
+            lines.append(f'"{node}" -> "{dep}"')
+    return "\n".join(lines)
+
+
 def main() -> int:
     """Точка входа приложения."""
     if len(sys.argv) < 2:
@@ -186,7 +273,7 @@ def main() -> int:
         return 1
 
     print_config(cfg)
-    print("\nПостроение графа...")
+    print("\nПостроение графа (это может занять время)...")
 
     if cfg.test_mode:
         test_graph = load_test_graph(cfg.test_file_path)
@@ -210,12 +297,19 @@ def main() -> int:
         max_depth=cfg.max_depth,
     )
 
-    print("\nРезультат (Граф зависимостей):")
-    for node, deps in graph.items():
-        if deps:
-            print(f"{node} -> {', '.join(deps)}")
-        else:
-            print(f"{node} -> (нет зависимостей)")
+    # Этап 4: Порядок загрузки
+    print("\n--- Порядок загрузки зависимостей ---")
+    load_order = get_load_order(graph)
+    for idx, pkg in enumerate(load_order, 1):
+        print(f"{idx}. {pkg}")
+
+    # Этап 5: Визуализация
+    print("\n--- D2 Диаграмма ---")
+    print(generate_d2(graph))
+
+    if cfg.ascii_tree:
+        print("\n--- ASCII Дерево ---")
+        print_ascii_tree(graph, cfg.package_name)
 
     return 0
 
