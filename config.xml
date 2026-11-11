@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <package_name>serde</package_name>
+    <repo_url>https://crates.io/api/v1/crates</repo_url>
+    <test_mode>false</test_mode>
+    <test_file_path></test_file_path>
+    <package_version>1.0.0</package_version>
+    <ascii_tree>false</ascii_tree>
+    <max_depth>3</max_depth>
+    <filter_substring></filter_substring>
+</config>
