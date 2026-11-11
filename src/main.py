@@ -1,9 +1,12 @@
 """CLI-инструмент визуализации графа зависимостей Cargo."""
 
 import sys
+import json
+import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable
 
 MAX_DEPTH_DEFAULT = 5
 
@@ -90,6 +93,86 @@ def print_config(cfg: Config) -> None:
     print(f"filter_substring = {cfg.filter_substring}")
 
 
+def fetch_dependencies_api(package: str, version: str = "") -> list[str]:
+    """Извлекает прямые зависимости пакета с crates.io."""
+    if version:
+        url = (
+            f"https://crates.io/api/v1/crates/"
+            f"{package}/{version}/dependencies"
+        )
+    else:
+        url = f"https://crates.io/api/v1/crates/{package}/dependencies"
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "CargoDepVisualizer/1.0"}
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        print(f"Ошибка сети для {package}: {exc}", file=sys.stderr)
+        return []
+
+    deps = set()
+    for item in data.get("dependencies", []):
+        crate_id = item.get("crate_id")
+        if crate_id:
+            deps.add(crate_id)
+    return list(deps)
+
+
+def load_test_graph(filepath: str) -> dict[str, list[str]]:
+    """Загружает граф из тестового файла формата 'A: B, C'."""
+    graph = {}
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" in line:
+                    node, deps_str = line.split(":", 1)
+                    node = node.strip()
+                    deps = [d.strip() for d in deps_str.split(",")]
+                    graph[node] = [d for d in deps if d]
+    except FileNotFoundError:
+        print(f"Файл {filepath} не найден", file=sys.stderr)
+    return graph
+
+
+def bfs_recursive(
+    current_level: list[str],
+    fetcher: Callable[[str], list[str]],
+    max_depth: int,
+    current_depth: int = 0,
+    visited: Optional[set] = None,
+    graph: Optional[dict] = None,
+) -> dict[str, list[str]]:
+    """Строит граф зависимостей рекурсивным BFS."""
+    if visited is None:
+        visited = set()
+    if graph is None:
+        graph = {}
+
+    if current_depth > max_depth or not current_level:
+        return graph
+
+    next_level = []
+    for node in current_level:
+        if node in visited:
+            continue
+        visited.add(node)
+
+        deps = fetcher(node)
+        graph[node] = deps
+
+        for dep in deps:
+            if dep not in visited:
+                next_level.append(dep)
+
+    return bfs_recursive(
+        next_level, fetcher, max_depth, current_depth + 1, visited, graph
+    )
+
+
 def main() -> int:
     """Точка входа приложения."""
     if len(sys.argv) < 2:
@@ -103,6 +186,37 @@ def main() -> int:
         return 1
 
     print_config(cfg)
+    print("\nПостроение графа...")
+
+    if cfg.test_mode:
+        test_graph = load_test_graph(cfg.test_file_path)
+
+        def fetcher(node: str) -> list[str]:
+            return test_graph.get(node, [])
+    else:
+        def fetcher(node: str) -> list[str]:
+            v = cfg.package_version if node == cfg.package_name else ""
+            return fetch_dependencies_api(node, v)
+
+    def filtered_fetcher(node: str) -> list[str]:
+        deps = fetcher(node)
+        if cfg.filter_substring:
+            return [d for d in deps if cfg.filter_substring not in d]
+        return deps
+
+    graph = bfs_recursive(
+        current_level=[cfg.package_name],
+        fetcher=filtered_fetcher,
+        max_depth=cfg.max_depth,
+    )
+
+    print("\nРезультат (Граф зависимостей):")
+    for node, deps in graph.items():
+        if deps:
+            print(f"{node} -> {', '.join(deps)}")
+        else:
+            print(f"{node} -> (нет зависимостей)")
+
     return 0
 
 
