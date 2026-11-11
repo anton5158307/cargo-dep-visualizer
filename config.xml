@@ -3,7 +3,7 @@
     <package_name>serde</package_name>
     <repo_url>https://crates.io/api/v1/crates</repo_url>
     <test_mode>false</test_mode>
-    <test_file_path></test_file_path>
+    <test_file_path>test_graph.txt</test_file_path>
     <package_version>1.0.0</package_version>
     <ascii_tree>true</ascii_tree>
     <max_depth>3</max_depth>
